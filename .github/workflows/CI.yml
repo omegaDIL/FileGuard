@@ -1,0 +1,165 @@
+name: CI
+
+env:
+  GCC_VERSION: 16
+  CLANG_VERSION: 22
+
+on:
+  push:
+    branches: ["master", "main"]
+  pull_request:
+    branches: ["master", "main"]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+
+      matrix:
+      
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        build_type: [Debug, Release]
+        compiler: [gcc, clang, msvc]
+        generator: [VisualStudio, Ninja]
+        
+        exclude:
+
+          - os: ubuntu-latest
+            compiler: msvc
+          - os: macos-latest
+            compiler: msvc
+          - os: macos-latest
+            compiler: gcc
+
+          - os: ubuntu-latest
+            generator: VisualStudio
+          - os: macos-latest
+            generator: VisualStudio
+
+          - compiler: gcc
+            generator: VisualStudio
+          - compiler: clang
+            generator: VisualStudio
+    steps:
+
+      # Actions, CMake and Ninja
+      - uses: actions/checkout@v4
+      - uses: lukka/get-cmake@latest
+
+
+      # ---------------------------------------------------------------------------------------------------------------
+      # Linux.
+      # ---------------------------------------------------------------------------------------------------------------
+
+      - name: Set up GCC on Linux
+        if: matrix.os == 'ubuntu-latest' #matrix.compiler == 'gcc' # GCC is installed even if the compiler is clang because clang needs libstdc++ in this project
+        run: |
+          sudo add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install -y gcc-$GCC_VERSION g++-$GCC_VERSION
+
+      - name: Set up LLVM/Clang on Linux
+        if: matrix.os == 'ubuntu-latest' && matrix.compiler == 'clang'
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh $CLANG_VERSION
+
+      - name: Configure CMake with GCC/Clang on Linux
+        if: matrix.os == 'ubuntu-latest' && (matrix.compiler == 'gcc' || matrix.compiler == 'clang')
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler == 'gcc' && format('g++-{0}', env.GCC_VERSION) || format('clang++-{0}', env.CLANG_VERSION) }}
+
+      # ---------------------------------------------------------------------------------------------------------------
+      # Windows.
+      # ---------------------------------------------------------------------------------------------------------------
+
+      - name: Set up MSVC on Windows
+        if: matrix.os == 'windows-latest' && matrix.compiler == 'msvc'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set up GCC (mingw) on windows
+        if: matrix.os == 'windows-latest' && matrix.compiler == 'gcc'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Set up Clang (mingw) on Windows
+        if: matrix.os == 'windows-latest' && matrix.compiler == 'clang'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-lld
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+
+      - name: Configure CMake with MSVC on Windows
+        if: matrix.os == 'windows-latest' && matrix.compiler == 'msvc'
+        run: >
+          cmake -B build ${{ matrix.generator == 'VisualStudio' && ' ' || '-G Ninja' }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Configure CMake with GCC (mingw) on Windows
+        if: matrix.os == 'windows-latest' && matrix.compiler == 'gcc'
+        shell: msys2 {0}
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Configure CMake with Clang (mingw) on Windows
+        if: matrix.os == 'windows-latest' && matrix.compiler == 'clang'
+        shell: msys2 {0}
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_CXX_FLAGS="-stdlib=libc++"
+          -DCMAKE_EXE_LINKER_FLAGS="-static"
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          
+      # ---------------------------------------------------------------------------------------------------------------
+      # Mac OS.
+      # ---------------------------------------------------------------------------------------------------------------
+
+      - name: Set up clang on mac OS
+        if: matrix.os == 'macos-latest' && matrix.compiler == 'clang'
+        run: brew install llvm
+
+      - name: Configure CMake with Clang on mac OS
+        if: matrix.os == 'macos-latest' && matrix.compiler == 'clang'
+        run: |
+          LLVM_PREFIX=$(brew --prefix llvm)
+          MODULES_JSON="$LLVM_PREFIX/lib/c++/libc++.modules.json"
+          if [ ! -f "$MODULES_JSON" ]; then
+            echo "::warning::libc++.modules.json not found at $MODULES_JSON — disabling import std for this leg"
+            MODULES_JSON_ARG=""
+          else
+            MODULES_JSON_ARG="-DCMAKE_CXX_STDLIB_MODULES_JSON=$MODULES_JSON"
+          fi
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_C_COMPILER="$LLVM_PREFIX/bin/clang" \
+            -DCMAKE_CXX_COMPILER="$LLVM_PREFIX/bin/clang++" \
+            $MODULES_JSON_ARG
+          
+
+      # Building CMake
+      - name: Build CMake
+        run: cmake --build build --parallel
+
+
+      # Running tests
+      - name: Tests
+        working-directory: build
+        run: ctest --output-on-failure --build-config ${{ matrix.build_type }}
